@@ -1,34 +1,33 @@
-# Student Academic Success Prediction — OULAD (Phase 1)
+# Student Academic Success Prediction — OULAD
 
 Predicting student outcomes (Distinction, Pass, Fail, Withdrawn) in online distance learning using the Open University Learning Analytics Dataset.
 
 ## Problem
 
-Over 52% of students in the Open University's online modules either fail or withdraw. Early identification of at-risk students would allow timely intervention. This project builds classification models to predict student outcomes using demographics, VLE engagement patterns, and assessment performance.
+Over 52% of students in the Open University's online modules either fail or withdraw. This project builds classification models to predict student outcomes using demographics, VLE engagement patterns, and assessment performance, enabling early intervention for at-risk students.
 
-A key design decision is the **prediction point** — at what day into the module do we make the prediction? The notebook uses a configurable `PREDICTION_DAY` parameter that filters all time-dependent data (VLE clicks, assessment submissions) to only include information available up to that day, simulating a realistic early-warning deployment.
+The key design question is: **at what point during the module can we reliably predict who will struggle?** We build datasets at two prediction points (day 50 and day 100) and compare models with and without assessment scores.
+
+## Results
+
+| Setup | Target | Best Model | F1 Score |
+|---|---|---|---|
+| Day 100, all features | Binary | XGBoost | **0.849** |
+| Day 100, no scores | Binary | XGBoost | **0.814** |
+| Day 100, all features | Multi-class | XGBoost | **0.646** |
+| Day 50, no scores | Binary | XGBoost | **0.762** |
+
+**Key finding:** VLE engagement alone (no grades) achieves **95.9%** of the full-feature binary F1 (0.814 vs 0.849) — a practical early-warning system is viable without any assessment data. The most important feature is `engagement_trend` (ratio of second-half to first-half clicks, importance: 0.109).
 
 ## Dataset
 
-The [Open University Learning Analytics Dataset (OULAD)](https://analyse.kmi.open.ac.uk/open_dataset) is a relational dataset tracking 32,593 student-module registrations across 7 modules and 4 semesters (2013–2014).
-
-| Table | Rows | Description |
-|---|---|---|
-| `courses` | 22 | Module metadata (length in days) |
-| `assessments` | 206 | Assessment schedule, types, weights |
-| `vle` | 6,364 | VLE material catalogue |
-| `studentInfo` | 32,593 | Demographics + target (`final_result`) |
-| `studentRegistration` | 32,593 | Registration and un-registration dates |
-| `studentAssessment` | 173,912 | Individual score submissions |
-| `studentVle` | 10,655,280 | Daily click logs per student per VLE page |
-
-Place the CSV files inside a `datasets/` folder in the project root.
+The [Open University Learning Analytics Dataset (OULAD)](https://analyse.kmi.open.ac.uk/open_dataset) — 32,593 student registrations, 7 modules, 10.6M VLE click logs.
 
 ## Project Structure
 
 ```
 ├── README.md
-├── datasets/               # OULAD CSV files (not included — download from source)
+├── datasets/               # OULAD CSV files (download from source)
 │   ├── courses.csv
 │   ├── assessments.csv
 │   ├── vle.csv
@@ -36,80 +35,74 @@ Place the CSV files inside a `datasets/` folder in the project root.
 │   ├── studentRegistration.csv
 │   ├── studentAssessment.csv
 │   └── studentVle.csv
-└── main.ipynb              # Phase 1: EDA, Preprocessing & Feature Engineering
+└── main.ipynb              # Full notebook (Phase 1 + Phase 2)
 ```
 
-## EDA Highlights
+## Methods
 
-- **VLE engagement** is the strongest predictor: Distinction students have 9x more clicks and 7x more active days than Withdrawn students.
-- **Assessment scores** clearly separate outcome groups but are partially circular — they determine the target rather than just predicting it.
-- **Education level** is the strongest demographic predictor (28.1% Distinction for postgraduates vs 4.6% for no-qualifications).
-- **IMD deprivation** shows a 3x difference in Distinction rate between least and most deprived areas.
-- **Temporal trend**: withdrawal rates increased from 2013 to 2014, noted as a limitation.
-- **12.3% of students** appear in multiple modules, requiring group-aware train-test splitting.
-- **Un-registration** directly encodes withdrawal and was identified as a leakage variable.
-- Statistical tests (Chi-square, Kruskal-Wallis) confirm all major findings.
+### Models
+1. **Decision Tree** — baseline (tuned: max_depth=8, criterion=gini)
+2. **SVM (RBF)** — nonlinear classifier (tuned: C=100, gamma=0.001)
+3. **XGBoost** — gradient boosting (tuned: 500 trees, depth 5, lr=0.05, regularised)
 
-## Preprocessing
+All models tuned via GridSearchCV / RandomizedSearchCV with GroupKFold (5 folds).
 
-- Missing `imd_band` (3.4%) imputed with mode; registration dates imputed with per-module median.
-- 7 relational tables merged into a single student-level dataframe via left joins.
-- Post-merge NaN values (students with no VLE/assessment activity) filled with 0.
-- Coursework and exam scores computed as separate features (independent grading pools).
-- `PREDICTION_DAY` parameter filters VLE clicks and assessment submissions to simulate early prediction.
+### Experiments
 
-## Engineered Features
+| Experiment | Day | Features | Purpose |
+|---|---|---|---|
+| A1 | 50 | All (62) | Early prediction |
+| A2 | 100 | All (62) | Mid-module prediction |
+| B1 | 50 | No scores (51) | Early-warning without grades |
+| B2 | 100 | No scores (51) | Mid-module early-warning |
 
-| Category | Features | Available early? |
-|---|---|---|
-| Demographics | gender, age, education, IMD, disability, region, module, semester | ✓ Always |
-| Registration | studied_credits, num_of_prev_attempts | ✓ Always |
-| VLE engagement | total_clicks, active_days, distinct_pages, clicks_per_day, activity_diversity | ✓ Filtered to prediction day |
-| Engagement trend | clicks_first_half, clicks_second_half, engagement_trend | ✓ Filtered to prediction day |
-| Activity types | clicks per type (oucontent, forum, quiz, etc.), forum_ratio | ✓ Filtered to prediction day |
-| Assessment | mean_score, std_score, weighted_coursework, exam_score, score_range | ⚠ Only if submitted before prediction day |
-| Submission behaviour | submission_rate, num_submissions, pct_late, mean_days_early | ⚠ Only if submitted before prediction day |
-| Flags | has_submitted_coursework, has_sat_exam, first_click_date | ⚠ / ✓ Depends on timing |
+Each experiment evaluated on both multi-class (4 outcomes) and binary (Success vs At-Risk) targets.
 
-## Key Methodological Decisions
+### Techniques
+- **SMOTE** oversampling for multi-class (Distinction is only 9.3%)
+- **Feature selection** — dropped 2 zero-importance features (exam_score, has_sat_exam)
+- **Weekly trajectory features** — click_slope, active_weeks, zero_weeks, last_week_ratio, click_weekly_std
+- **Group-aware split** by student ID (12.3% appear in multiple modules)
+- **Time-aware framework** — configurable prediction day filters VLE/assessment data
+
+### Key Engineered Features
+
+| Feature | Description |
+|---|---|
+| `engagement_trend` | Second-half / first-half clicks — #1 predictor (importance: 0.109) |
+| `click_slope` | Linear regression slope of weekly clicks |
+| `active_weeks` | Weeks with any VLE activity (Distinction median: 14, Withdrawn: 6) |
+| `zero_weeks` | Weeks with zero clicks (gaps in engagement) |
+| `submission_rate` | Fraction of expected assessments submitted |
+| `weighted_coursework` | Weighted average of TMA+CMA scores (separate from exam) |
+
+### Key Decisions
 
 | Decision | Rationale |
 |---|---|
 | Separate coursework and exam scores | Independent grading pools (each sums to 100%) |
 | Group-aware split by student ID | 12.3% of students appear in multiple modules |
 | Exclude `date_unregistration` | Directly encodes withdrawal (leakage) |
-| Configurable `PREDICTION_DAY` | Simulates realistic deployment with limited future data |
-| Mode imputation for IMD band | Preserves ordinal encoding (vs "Unknown" category) |
-| Zero-fill post-merge NaN | Absence of VLE/assessment activity is informative, not missing |
+| Two prediction days (50, 100) | Studies accuracy vs timing tradeoff |
+| Two experiments (with/without scores) | Separates circular accuracy from genuine prediction |
+| SMOTE for multi-class only | +0.29pp for multi-class, −0.11pp for binary |
+| Drop exam_score, has_sat_exam | Zero importance at day 100 (exam not yet taken) |
 
 ## How to Run
 
 ### Requirements
 
 ```
-python >= 3.10
-pandas
-numpy
-matplotlib
-seaborn
-scipy
+pip install pandas numpy matplotlib seaborn scipy scikit-learn xgboost imbalanced-learn
 ```
 
 ### Setup
 
-1. Download the OULAD dataset from [https://analyse.kmi.open.ac.uk/open_dataset](https://analyse.kmi.open.ac.uk/open_dataset)
-2. Extract CSV files into a `datasets/` folder
-3. Open `main.ipynb` and run all cells
+1. Download OULAD from [https://analyse.kmi.open.ac.uk/open_dataset](https://analyse.kmi.open.ac.uk/open_dataset)
+2. Extract CSV files into `datasets/`
+3. Run `main.ipynb` (Restart Kernel → Run All)
 
-### Prediction Day Configuration
-
-At the top of the notebook, set the prediction cutoff:
-
-```python
-PREDICTION_DAY = None   # None = use all data (retrospective)
-PREDICTION_DAY = 100    # Only use data from the first 100 days
-PREDICTION_DAY = 30     # Very early prediction (limited data)
-```
+**Note:** VLE aggregation runs twice (~2 min each). Hyperparameter tuning takes ~3 hours total (can be skipped by hardcoding the tuned parameters).
 
 ## Authors
 
